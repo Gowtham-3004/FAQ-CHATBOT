@@ -55,7 +55,7 @@ def chat(req: ChatRequest):
 @app.get("/widget.js", include_in_schema=False)
 def serve_widget():
     """Serve the embeddable chat widget JavaScript file."""
-    return FileResponse(WIDGET_PATH, media_type="application/javascript")
+    return FileResponse(WIDGET_PATH, media_type="application/javascript; charset=utf-8")
 
 
 @app.get("/health")
