@@ -9,13 +9,21 @@ An end-to-end FAQ chatbot system with an **Admin Portal** for document ingestion
 ```
 Admin Portal (Streamlit :8502)
   └── Upload documents (PDF, DOCX, TXT, XLSX)
-  └── Auto-generate Q&A via Azure GPT-4o-mini
+  └── Auto-generate Q&A via Google Gemini
   └── Review / Edit / Delete Q&A
-  └── Saved to data/extracted_qa/*.json
+  └── All data stored in MongoDB via FastAPI
 
 Chat API (FastAPI :8000)
-  └── POST /chat  → keyword search + Azure GPT answer
-  └── GET  /widget.js → serves embeddable widget
+  └── POST /auth/login  → user authentication (MongoDB)
+  └── POST /chat        → keyword search + Gemini answer
+  └── GET/POST/PUT/DELETE /faqs       → Q&A CRUD
+  └── GET/POST/DELETE   /documents    → document registry CRUD
+  └── GET  /widget.js   → serves embeddable widget
+
+MongoDB
+  └── users             → login credentials + roles
+  └── faqs              → all Q&A pairs
+  └── document_registry → uploaded document metadata
 
 Any Webpage
   └── <script src="http://localhost:8000/widget.js">
@@ -28,12 +36,12 @@ Any Webpage
 
 | Layer | Technology |
 |-------|-----------|
-| LLM | Azure OpenAI — `gpt-4o-mini` |
+| LLM | Google Gemini — `gemini-2.5-flash` |
 | Admin UI | Streamlit |
 | Chat API | FastAPI + Uvicorn |
 | Document Parsing | pdfplumber, python-docx, openpyxl |
-| Auth | JSON file (`data/users.json`) |
-| Storage | JSON files (`data/extracted_qa/`) |
+| Auth | MongoDB (`users` collection) via FastAPI |
+| Storage | MongoDB Atlas (FAQs + registry + users) |
 | Widget | Vanilla JS + Shadow DOM |
 
 ---
@@ -43,20 +51,18 @@ Any Webpage
 ```
 FAQ-CHATBOT/
 ├── src/
-│   ├── config.py               # Environment settings (Azure keys)
+│   ├── config.py               # Environment settings (Gemini + MongoDB)
+│   ├── database.py             # MongoDB client + shared collections
 │   ├── document_processor.py   # Extract + chunk text from documents
-│   ├── qa_generator.py         # GPT-4o-mini Q&A generation
-│   ├── chat.py                 # Chat search + answer logic
-│   └── main.py                 # FastAPI app
+│   ├── qa_generator.py         # Gemini Q&A generation
+│   ├── chat.py                 # Chat search + answer logic (reads MongoDB)
+│   └── main.py                 # FastAPI app (all API endpoints)
 ├── ui/
-│   └── admin.py                # Streamlit admin portal
+│   └── admin.py                # Streamlit admin portal (calls FastAPI)
 ├── public/
 │   └── widget.js               # Embeddable floating chat widget
 ├── data/
-│   ├── users.json              # Admin login credentials
-│   ├── document_registry.json  # Uploaded document metadata
-│   └── extracted_qa/           # Q&A JSON files per document
-├── screenshots/                # → place your screenshots here
+│   └── users.json              # (legacy — users now stored in MongoDB)
 ├── floating_faq.html           # Test page for the chat widget
 └── requirements.txt
 ```
@@ -84,7 +90,16 @@ pip install -r requirements.txt
 Create a `.env` file in the project root:
 
 ```env
-gemini_api_key=''
+# Google Gemini
+GEMINI_API_KEY=AIza...
+
+# MongoDB Atlas
+MONGODB_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DB=faq_chatbot
+MONGODB_COLLECTION=faqs
+
+# API URL (used by Streamlit to call FastAPI)
+API_URL=http://localhost:8000
 ```
 
 ---
@@ -98,6 +113,8 @@ source .venv/bin/activate
 uvicorn src.main:app --reload --port 8000
 ```
 
+On first startup, default admin users are automatically seeded into MongoDB.
+
 API docs available at: `http://localhost:8000/docs`
 
 ### Terminal 2 — Admin Portal
@@ -109,13 +126,15 @@ streamlit run ui/admin.py --server.port 8502
 
 Admin portal at: `http://localhost:8502`
 
+> **Note:** The FastAPI server must be running before launching the admin portal.
+
 ---
 
 ## Admin Portal
 
 ### Login
 
-Default credentials (edit `data/users.json` to change):
+Default credentials (seeded into MongoDB on first startup):
 
 | Username | Password | Role |
 |----------|----------|------|
@@ -133,8 +152,9 @@ Default credentials (edit `data/users.json` to change):
 2. Upload a document (PDF, DOCX, TXT, or XLSX) in the left panel
 3. Click **Extract Q&A** — the system will:
    - Extract and chunk the document text
-   - Send each chunk to Azure GPT-4o-mini
+   - Send each chunk to Google Gemini
    - Generate 2–5 Q&A pairs per chunk
+   - Save all Q&A to MongoDB via the FastAPI API
 4. Q&A pairs appear in the right panel
 
 <!-- SCREENSHOT: Upload and extraction in progress -->
@@ -145,8 +165,8 @@ Default credentials (edit `data/users.json` to change):
 ### Q&A Management
 
 Each extracted Q&A can be:
-- **Edited** — inline edit form with Save / Cancel
-- **Deleted** — shows confirmation prompt before deleting
+- **Edited** — inline edit form with Save / Cancel (calls `PUT /faqs/{faq_id}`)
+- **Deleted** — shows confirmation prompt before deleting (calls `DELETE /faqs/{faq_id}`)
 
 <!-- SCREENSHOT: Q&A list with Edit and Delete buttons -->
 > ![Q&A List](assets/list_q&a.png)
@@ -165,7 +185,7 @@ All uploaded documents are listed in the left sidebar with:
 - Upload date and uploader name
 - Chunk count and Q&A count
 - **View Q&A** — load that document's Q&A into the viewer
-- **Delete Document** — removes document and all its Q&A (with confirmation)
+- **Delete Document** — removes document and all its Q&A from MongoDB (with confirmation)
 
 <!-- SCREENSHOT: Document library with documents listed -->
 > ![Document Library](assets/doc_library.png)
@@ -197,8 +217,7 @@ Paste this into `<head>` or before `</body>`. A floating 💬 bubble appears in 
 
 ### Chat in action
 
-Click the bubble to open the chat panel. Type a question — the bot searches the extracted Q&A and replies using Azure GPT.
-
+Click the bubble to open the chat panel. Type a question — the bot searches the extracted Q&A and replies using Google Gemini.
 
 > ![Chat Window](assets/chat_window.png)
 
@@ -213,30 +232,29 @@ User types a question
         ↓
 POST /chat → src/chat.py
         ↓
-Load all Q&A from data/extracted_qa/*.json
+Load all Q&A from MongoDB (faqs collection)
         ↓
 Keyword scoring → top 4 relevant Q&A selected
         ↓
-Azure GPT-4o-mini generates a grounded answer
+Google Gemini generates a grounded answer
         ↓
 Reply shown in chat widget
 ```
 
 ---
 
-## Adding / Changing Admin Users
+## Managing Admin Users
 
-Edit `data/users.json`:
+Users are stored in the MongoDB `users` collection. To add or change users, connect to your MongoDB cluster and update the collection directly:
 
-```json
-[
-  {
-    "username": "yourname",
-    "password": "yourpassword",
-    "role": "admin",
-    "name": "Your Full Name"
-  }
-]
+```js
+// MongoDB Shell
+db.users.insertOne({
+  username: "yourname",
+  password: "yourpassword",
+  role: "admin",
+  name: "Your Full Name"
+})
 ```
 
 ---
@@ -245,7 +263,15 @@ Edit `data/users.json`:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| `POST` | `/auth/login` | Verify credentials, return user record |
 | `POST` | `/chat` | Send a question, get an answer |
+| `GET` | `/faqs` | List all Q&A pairs (filter by `?stem=`) |
+| `POST` | `/faqs/bulk` | Replace all Q&A for a document stem |
+| `PUT` | `/faqs/{faq_id}` | Update a Q&A pair |
+| `DELETE` | `/faqs/{faq_id}` | Delete a Q&A pair |
+| `GET` | `/documents` | List document registry |
+| `POST` | `/documents` | Upsert a document record |
+| `DELETE` | `/documents/{stem}` | Delete document and all its Q&A |
 | `GET` | `/widget.js` | Serve the embeddable widget script |
 | `GET` | `/health` | Liveness check |
 
@@ -259,4 +285,16 @@ Edit `data/users.json`:
 **Response:**
 ```json
 { "reply": "We offer a 30-day money-back guarantee..." }
+```
+
+### POST /auth/login
+
+**Request:**
+```json
+{ "username": "admin", "password": "admin123" }
+```
+
+**Response:**
+```json
+{ "username": "admin", "role": "admin", "name": "Admin User" }
 ```
