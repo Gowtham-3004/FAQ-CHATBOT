@@ -24,9 +24,10 @@ Be concise, friendly, and accurate. Never make up information."""
 # Load Q&A
 # ---------------------------------------------------------------------------
 
-def load_all_qa() -> list[dict]:
-    """Load all Q&A pairs from MongoDB."""
-    return list(faqs_col.find({}, {"_id": 0, "stem": 0}))
+def load_all_qa(user_id: str | None = None) -> list[dict]:
+    """Load Q&A pairs from MongoDB, optionally filtered by user_id."""
+    query = {"user_id": user_id} if user_id else {}
+    return list(faqs_col.find(query, {"_id": 0, "stem": 0, "user_id": 0}))
 
 
 # ---------------------------------------------------------------------------
@@ -58,9 +59,9 @@ def find_relevant(question: str, all_qa: list[dict], top_k: int = 4) -> list[dic
 # Answer generation
 # ---------------------------------------------------------------------------
 
-def answer_question(question: str) -> str:
-    """Full pipeline: load Q&A → find relevant → generate GPT answer."""
-    all_qa = load_all_qa()
+def answer_question(question: str, user_id: str | None = None) -> str:
+    """Full pipeline: load Q&A → find relevant → generate Gemini answer."""
+    all_qa = load_all_qa(user_id=user_id)
 
     if not all_qa:
         return (

@@ -2,31 +2,35 @@
 
 An end-to-end FAQ chatbot system with an **Admin Portal** for document ingestion and a **floating chat widget** that can be embedded into any webpage with a single `<script>` tag.
 
+Each admin user gets an isolated knowledge base — the widget only answers from documents uploaded by the user whose `data-user-id` matches.
+
 ---
 
 ## Architecture
 
 ```
 Admin Portal (Streamlit :8502)
+  └── Login → POST /auth/login (MongoDB)
   └── Upload documents (PDF, DOCX, TXT, XLSX)
   └── Auto-generate Q&A via Google Gemini
   └── Review / Edit / Delete Q&A
-  └── All data stored in MongoDB via FastAPI
+  └── Q&A tagged with uploader's user_id → stored in MongoDB
 
 Chat API (FastAPI :8000)
-  └── POST /auth/login  → user authentication (MongoDB)
-  └── POST /chat        → keyword search + Gemini answer
+  └── POST /auth/login          → user authentication
+  └── POST /chat                → filtered keyword search + Gemini answer
   └── GET/POST/PUT/DELETE /faqs       → Q&A CRUD
   └── GET/POST/DELETE   /documents    → document registry CRUD
-  └── GET  /widget.js   → serves embeddable widget
+  └── GET  /widget.js           → serves embeddable widget
 
 MongoDB
   └── users             → login credentials + roles
-  └── faqs              → all Q&A pairs
+  └── faqs              → Q&A pairs (each tagged with user_id)
   └── document_registry → uploaded document metadata
 
 Any Webpage
-  └── <script src="http://localhost:8000/widget.js">
+  └── <script data-user-id="admin" ...>
+  └── Widget sends user_id → backend filters FAQs by user_id
   └── Floating 💬 chat bubble (bottom-right)
 ```
 
@@ -42,6 +46,7 @@ Any Webpage
 | Document Parsing | pdfplumber, python-docx, openpyxl |
 | Auth | MongoDB (`users` collection) via FastAPI |
 | Storage | MongoDB Atlas (FAQs + registry + users) |
+| Multi-tenancy | `user_id` field on every FAQ document |
 | Widget | Vanilla JS + Shadow DOM |
 
 ---
@@ -55,14 +60,12 @@ FAQ-CHATBOT/
 │   ├── database.py             # MongoDB client + shared collections
 │   ├── document_processor.py   # Extract + chunk text from documents
 │   ├── qa_generator.py         # Gemini Q&A generation
-│   ├── chat.py                 # Chat search + answer logic (reads MongoDB)
+│   ├── chat.py                 # Chat search + answer logic (filtered by user_id)
 │   └── main.py                 # FastAPI app (all API endpoints)
 ├── ui/
 │   └── admin.py                # Streamlit admin portal (calls FastAPI)
 ├── public/
 │   └── widget.js               # Embeddable floating chat widget
-├── data/
-│   └── users.json              # (legacy — users now stored in MongoDB)
 ├── floating_faq.html           # Test page for the chat widget
 └── requirements.txt
 ```
@@ -91,7 +94,7 @@ Create a `.env` file in the project root:
 
 ```env
 # Google Gemini
-GEMINI_API_KEY=AIza...
+GEMINI_API_KEY=56ygza...
 
 # MongoDB Atlas
 MONGODB_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority
@@ -134,13 +137,6 @@ Admin portal at: `http://localhost:8502`
 
 ### Login
 
-Default credentials (seeded into MongoDB on first startup):
-
-| Username | Password | Role |
-|----------|----------|------|
-| admin | admin123 | admin |
-| editor | editor456 | editor |
-
 <!-- SCREENSHOT: Login page -->
 > ![Login Page](assets/login_page.png)
 
@@ -154,7 +150,7 @@ Default credentials (seeded into MongoDB on first startup):
    - Extract and chunk the document text
    - Send each chunk to Google Gemini
    - Generate 2–5 Q&A pairs per chunk
-   - Save all Q&A to MongoDB via the FastAPI API
+   - Save all Q&A to MongoDB, tagged with the logged-in user's `username` as `user_id`
 4. Q&A pairs appear in the right panel
 
 <!-- SCREENSHOT: Upload and extraction in progress -->
@@ -208,16 +204,27 @@ Extracted Q&A can be downloaded as:
 ### Embed in any webpage
 
 ```html
-<script src="http://localhost:8000/widget.js" data-api="http://localhost:8000"></script>
+<script
+  src="http://localhost:8000/widget.js"
+  data-api="http://localhost:8000"
+  data-user-id="admin">
+</script>
 ```
 
 Paste this into `<head>` or before `</body>`. A floating 💬 bubble appears in the bottom-right corner.
+
+### Widget attributes
+
+| Attribute | Required | Description |
+|-----------|----------|-------------|
+| `data-api` | Yes | Base URL of the FastAPI server |
+| `data-user-id` | Recommended | Username whose documents to search. If omitted, searches all users' documents. |
 
 > ![Chat Bubble](assets/chat_bubble.png)
 
 ### Chat in action
 
-Click the bubble to open the chat panel. Type a question — the bot searches the extracted Q&A and replies using Google Gemini.
+Click the bubble to open the chat panel. Type a question — the bot searches only that user's Q&A and replies using Google Gemini.
 
 > ![Chat Window](assets/chat_window.png)
 
@@ -230,9 +237,9 @@ Click the bubble to open the chat panel. Type a question — the bot searches th
 ```
 User types a question
         ↓
-POST /chat → src/chat.py
+POST /chat  { message, user_id: "admin" }
         ↓
-Load all Q&A from MongoDB (faqs collection)
+MongoDB: faqs.find({ user_id: "admin" })
         ↓
 Keyword scoring → top 4 relevant Q&A selected
         ↓
@@ -240,6 +247,23 @@ Google Gemini generates a grounded answer
         ↓
 Reply shown in chat widget
 ```
+
+---
+
+## Multi-Tenancy (Per-User Isolation)
+
+Every FAQ document stored in MongoDB has a `user_id` field equal to the username of the admin who uploaded it.
+
+```
+Admin "alice" uploads → FAQs stored with  user_id: "alice"
+Admin "bob"   uploads → FAQs stored with  user_id: "bob"
+
+Widget with data-user-id="alice" → only searches alice's FAQs
+Widget with data-user-id="bob"   → only searches bob's FAQs
+Widget with no data-user-id      → searches all FAQs (no filter)
+```
+
+This lets you embed different widgets on different customer sites while sharing a single backend.
 
 ---
 
@@ -264,8 +288,8 @@ db.users.insertOne({
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/auth/login` | Verify credentials, return user record |
-| `POST` | `/chat` | Send a question, get an answer |
-| `GET` | `/faqs` | List all Q&A pairs (filter by `?stem=`) |
+| `POST` | `/chat` | Send a question, get an answer (filter by `user_id`) |
+| `GET` | `/faqs` | List Q&A pairs (filter by `?stem=` and/or `?user_id=`) |
 | `POST` | `/faqs/bulk` | Replace all Q&A for a document stem |
 | `PUT` | `/faqs/{faq_id}` | Update a Q&A pair |
 | `DELETE` | `/faqs/{faq_id}` | Delete a Q&A pair |
@@ -279,7 +303,7 @@ db.users.insertOne({
 
 **Request:**
 ```json
-{ "message": "What is your refund policy?" }
+{ "message": "What is your refund policy?", "user_id": "admin" }
 ```
 
 **Response:**

@@ -10,6 +10,9 @@
     (currentScript && currentScript.getAttribute("data-api")) ||
     "http://localhost:8000";
 
+  const USER_ID =
+    (currentScript && currentScript.getAttribute("data-user-id")) || null;
+
   function init() {
     // ---------------------------------------------------------------------
     // Host Container
@@ -296,7 +299,7 @@
         const res = await fetch(`${API_URL}/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text }),
+          body: JSON.stringify({ message: text, user_id: USER_ID }),
         });
 
         if (!res.ok) throw new Error(`Server error: ${res.status}`);

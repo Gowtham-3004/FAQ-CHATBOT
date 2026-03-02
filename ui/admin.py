@@ -70,8 +70,8 @@ def load_all_qa() -> list[dict]:
     return api_get("/faqs")
 
 
-def save_qa_for_doc(stem: str, qa_pairs: list[dict]) -> None:
-    api_post("/faqs/bulk", {"stem": stem, "qa_pairs": qa_pairs})
+def save_qa_for_doc(stem: str, qa_pairs: list[dict], user_id: str = "") -> None:
+    api_post("/faqs/bulk", {"stem": stem, "user_id": user_id, "qa_pairs": qa_pairs})
 
 
 def delete_document(stem: str) -> None:
@@ -239,8 +239,8 @@ def show_dashboard():
                 progress_bar.empty()
 
                 try:
-                    # Save Q&A to MongoDB via API
-                    save_qa_for_doc(stem, qa_pairs)
+                    # Save Q&A to MongoDB via API (tagged with uploader's username)
+                    save_qa_for_doc(stem, qa_pairs, user_id=user["username"])
 
                     # Upsert document record in registry
                     api_post("/documents", {

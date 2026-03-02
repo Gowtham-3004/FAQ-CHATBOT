@@ -63,6 +63,7 @@ class LoginRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    user_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -80,6 +81,7 @@ class DocumentRecord(BaseModel):
 
 class BulkFAQRequest(BaseModel):
     stem: str
+    user_id: str
     qa_pairs: list[dict]
 
 
@@ -111,7 +113,7 @@ def login(req: LoginRequest):
 def chat(req: ChatRequest):
     if not req.message.strip():
         return ChatResponse(reply="Please type a question.")
-    reply = answer_question(req.message.strip())
+    reply = answer_question(req.message.strip(), user_id=req.user_id)
     return ChatResponse(reply=reply)
 
 
@@ -142,16 +144,20 @@ def delete_document(stem: str):
 # ---------------------------------------------------------------------------
 
 @app.get("/faqs")
-def list_faqs(stem: Optional[str] = None):
-    query = {"stem": stem} if stem else {}
-    return list(faqs_col.find(query, {"_id": 0, "stem": 0}))
+def list_faqs(stem: Optional[str] = None, user_id: Optional[str] = None):
+    query: dict = {}
+    if stem:
+        query["stem"] = stem
+    if user_id:
+        query["user_id"] = user_id
+    return list(faqs_col.find(query, {"_id": 0, "stem": 0, "user_id": 0}))
 
 
 @app.post("/faqs/bulk", status_code=201)
 def bulk_replace_faqs(payload: BulkFAQRequest):
     faqs_col.delete_many({"stem": payload.stem})
     if payload.qa_pairs:
-        docs = [{**qa, "stem": payload.stem} for qa in payload.qa_pairs]
+        docs = [{**qa, "stem": payload.stem, "user_id": payload.user_id} for qa in payload.qa_pairs]
         faqs_col.insert_many(docs)
     return {"inserted": len(payload.qa_pairs)}
 
