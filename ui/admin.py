@@ -2,19 +2,19 @@
 FAQ Chatbot — Admin Portal (Streamlit)
 
 Persistence:
-  data/document_registry.json  — tracks every uploaded document + metadata
-  data/extracted_qa/<stem>.json — Q&A pairs per document
-
-On every login, both are loaded fresh from disk so nothing is lost.
+  All Q&A and document registry data is stored in MongoDB.
+  Data is read/written through the FastAPI backend (API_URL).
 """
 
 import io
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import requests
 import streamlit as st
 
 ROOT = Path(__file__).parent.parent
@@ -23,63 +23,68 @@ sys.path.insert(0, str(ROOT))
 from src.document_processor import process_document
 from src.qa_generator import generate_qa_from_document
 
-USERS_FILE     = ROOT / "data" / "users.json"
-QA_OUTPUT_DIR  = ROOT / "data" / "extracted_qa"
-REGISTRY_FILE  = ROOT / "data" / "document_registry.json"
-
-QA_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 
 # ---------------------------------------------------------------------------
-# Persistence helpers
+# API helpers
+# ---------------------------------------------------------------------------
+
+def api_get(path: str, **params) -> list | dict:
+    r = requests.get(f"{API_URL}{path}", params=params or None)
+    r.raise_for_status()
+    return r.json()
+
+
+def api_post(path: str, data: dict) -> dict:
+    r = requests.post(f"{API_URL}{path}", json=data)
+    r.raise_for_status()
+    return r.json()
+
+
+def api_put(path: str, data: dict) -> dict:
+    r = requests.put(f"{API_URL}{path}", json=data)
+    r.raise_for_status()
+    return r.json()
+
+
+def api_delete(path: str) -> dict:
+    r = requests.delete(f"{API_URL}{path}")
+    r.raise_for_status()
+    return r.json()
+
+
+# ---------------------------------------------------------------------------
+# Data helpers (via API)
 # ---------------------------------------------------------------------------
 
 def load_registry() -> list[dict]:
-    if REGISTRY_FILE.exists():
-        with open(REGISTRY_FILE) as f:
-            return json.load(f)
-    return []
-
-
-def save_registry(registry: list[dict]) -> None:
-    with open(REGISTRY_FILE, "w") as f:
-        json.dump(registry, f, indent=2)
+    return api_get("/documents")
 
 
 def load_qa_for_doc(stem: str) -> list[dict]:
-    qa_file = QA_OUTPUT_DIR / f"{stem}.json"
-    if qa_file.exists():
-        with open(qa_file) as f:
-            return json.load(f)
-    return []
+    return api_get("/faqs", stem=stem)
 
 
 def load_all_qa() -> list[dict]:
-    """Load Q&A for every document currently in the registry."""
-    all_qa = []
-    for doc in load_registry():
-        all_qa.extend(load_qa_for_doc(doc["stem"]))
-    return all_qa
+    return api_get("/faqs")
 
 
 def save_qa_for_doc(stem: str, qa_pairs: list[dict]) -> None:
-    with open(QA_OUTPUT_DIR / f"{stem}.json", "w") as f:
-        json.dump(qa_pairs, f, indent=2)
+    api_post("/faqs/bulk", {"stem": stem, "qa_pairs": qa_pairs})
 
 
 def delete_document(stem: str) -> None:
-    """Remove from registry and delete the Q&A file."""
-    registry = [d for d in load_registry() if d["stem"] != stem]
-    save_registry(registry)
-    qa_file = QA_OUTPUT_DIR / f"{stem}.json"
-    if qa_file.exists():
-        qa_file.unlink()
+    api_delete(f"/documents/{stem}")
 
 
 def refresh_state() -> None:
-    """Reload everything from disk into session state."""
+    """Reload registry, all Q&A, and current doc Q&A from the API."""
     st.session_state.registry = load_registry()
     st.session_state.all_qa   = load_all_qa()
+    if st.session_state.current_doc:
+        stem = Path(st.session_state.current_doc).stem
+        st.session_state.current_qa = load_qa_for_doc(stem)
 
 
 # ---------------------------------------------------------------------------
@@ -87,12 +92,13 @@ def refresh_state() -> None:
 # ---------------------------------------------------------------------------
 
 def verify_login(username: str, password: str) -> dict | None:
-    with open(USERS_FILE) as f:
-        users = json.load(f)
-    for user in users:
-        if user["username"] == username and user["password"] == password:
-            return user
-    return None
+    try:
+        r = requests.post(f"{API_URL}/auth/login", json={"username": username, "password": password})
+        if r.status_code == 200:
+            return r.json()
+        return None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -103,14 +109,12 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in    = False
     st.session_state.current_user = None
 
-# These are always loaded fresh from disk when the session starts
 if "registry" not in st.session_state:
     st.session_state.registry = load_registry()
 
 if "all_qa" not in st.session_state:
     st.session_state.all_qa = load_all_qa()
 
-# Q&A for the document processed in the current session only
 if "current_qa" not in st.session_state:
     st.session_state.current_qa = []
 
@@ -160,7 +164,6 @@ def show_login():
                 if user:
                     st.session_state.logged_in    = True
                     st.session_state.current_user = user
-                    # Always reload from disk on login
                     refresh_state()
                     st.rerun()
                 else:
@@ -235,24 +238,23 @@ def show_dashboard():
 
                 progress_bar.empty()
 
-                # Persist Q&A file
-                save_qa_for_doc(stem, qa_pairs)
+                try:
+                    # Save Q&A to MongoDB via API
+                    save_qa_for_doc(stem, qa_pairs)
 
-                # Update document registry (upsert by stem)
-                registry = load_registry()
-                registry = [d for d in registry if d["stem"] != stem]  # remove old entry if re-upload
-                registry.append({
-                    "filename":    uploaded.name,
-                    "stem":        stem,
-                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
-                    "uploaded_by": user["username"],
-                    "chunks":      len(chunks),
-                    "qa_count":    len(qa_pairs),
-                })
-                save_registry(registry)
+                    # Upsert document record in registry
+                    api_post("/documents", {
+                        "filename":    uploaded.name,
+                        "stem":        stem,
+                        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                        "uploaded_by": user["username"],
+                        "chunks":      len(chunks),
+                        "qa_count":    len(qa_pairs),
+                    })
+                except Exception as e:
+                    st.error(f"Failed to save to database: {e}")
+                    st.stop()
 
-                # Refresh session state from disk
-                st.session_state.current_qa  = qa_pairs
                 st.session_state.current_doc = uploaded.name
                 refresh_state()
 
@@ -281,7 +283,6 @@ def show_dashboard():
                         f"Chunks: {doc['chunks']} | Q&A: {doc['qa_count']}"
                     )
 
-                    # View button
                     if st.button("View Q&A", key=f"view_{doc['stem']}", use_container_width=True):
                         st.session_state.current_qa  = load_qa_for_doc(doc["stem"])
                         st.session_state.current_doc = doc["filename"]
@@ -342,7 +343,6 @@ def show_dashboard():
 
                     with st.expander(row["question"], expanded=is_editing):
                         if is_editing:
-                            # ── Inline edit form ──────────────────────────────
                             new_q = st.text_area("Question", value=row["question"],
                                                  key=f"eq_{faq_id}", height=80)
                             new_a = st.text_area("Answer", value=row["answer"],
@@ -351,13 +351,10 @@ def show_dashboard():
                             with col_save:
                                 if st.button("Save", key=f"save_{faq_id}",
                                              use_container_width=True, type="primary"):
-                                    for item in st.session_state.current_qa:
-                                        if item["faq_id"] == faq_id:
-                                            item["question"] = new_q.strip()
-                                            item["answer"]   = new_a.strip()
-                                            break
-                                    stem = Path(st.session_state.current_doc).stem
-                                    save_qa_for_doc(stem, st.session_state.current_qa)
+                                    api_put(f"/faqs/{faq_id}", {
+                                        "question": new_q.strip(),
+                                        "answer":   new_a.strip(),
+                                    })
                                     refresh_state()
                                     st.session_state.editing_faq_id = None
                                     st.rerun()
@@ -367,28 +364,16 @@ def show_dashboard():
                                     st.session_state.editing_faq_id = None
                                     st.rerun()
                         else:
-                            # ── Read-only view with action buttons ────────────
                             st.markdown(row["answer"])
                             st.caption(f"ID: `{faq_id}` | Chunk: {row['chunk_index']}")
 
                             if st.session_state.confirm_delete_id == faq_id:
-                                # ── Confirmation prompt ───────────────────────
                                 st.warning("Are you sure you want to delete this Q&A?")
                                 col_yes, col_no = st.columns(2)
                                 with col_yes:
                                     if st.button("Yes, Delete", key=f"yes_{faq_id}",
                                                  use_container_width=True, type="primary"):
-                                        st.session_state.current_qa = [
-                                            q for q in st.session_state.current_qa
-                                            if q["faq_id"] != faq_id
-                                        ]
-                                        stem = Path(st.session_state.current_doc).stem
-                                        save_qa_for_doc(stem, st.session_state.current_qa)
-                                        registry = load_registry()
-                                        for doc in registry:
-                                            if doc["stem"] == stem:
-                                                doc["qa_count"] = len(st.session_state.current_qa)
-                                        save_registry(registry)
+                                        api_delete(f"/faqs/{faq_id}")
                                         refresh_state()
                                         st.session_state.confirm_delete_id = None
                                         st.rerun()
@@ -455,7 +440,6 @@ def show_dashboard():
 
                 for _, row in df_all.iterrows():
                     faq_id   = row["faq_id"]
-                    doc_stem = Path(row["source"]).stem
                     is_editing_all = st.session_state.editing_faq_id == f"all_{faq_id}"
 
                     with st.expander(f"[{row['source']}]  {row['question']}", expanded=is_editing_all):
@@ -468,16 +452,10 @@ def show_dashboard():
                             with col_s:
                                 if st.button("Save", key=f"asave_{faq_id}",
                                              use_container_width=True, type="primary"):
-                                    doc_qa = load_qa_for_doc(doc_stem)
-                                    for item in doc_qa:
-                                        if item["faq_id"] == faq_id:
-                                            item["question"] = new_q.strip()
-                                            item["answer"]   = new_a.strip()
-                                            break
-                                    save_qa_for_doc(doc_stem, doc_qa)
-                                    # Keep current_qa in sync if same doc is open
-                                    if st.session_state.current_doc == row["source"]:
-                                        st.session_state.current_qa = doc_qa
+                                    api_put(f"/faqs/{faq_id}", {
+                                        "question": new_q.strip(),
+                                        "answer":   new_a.strip(),
+                                    })
                                     refresh_state()
                                     st.session_state.editing_faq_id = None
                                     st.rerun()
@@ -491,22 +469,12 @@ def show_dashboard():
                             st.caption(f"ID: `{faq_id}`")
 
                             if st.session_state.confirm_delete_id == f"all_{faq_id}":
-                                # ── Confirmation prompt ───────────────────────
                                 st.warning("Are you sure you want to delete this Q&A?")
                                 col_yes, col_no = st.columns(2)
                                 with col_yes:
                                     if st.button("Yes, Delete", key=f"ayes_{faq_id}",
                                                  use_container_width=True, type="primary"):
-                                        doc_qa = [q for q in load_qa_for_doc(doc_stem)
-                                                  if q["faq_id"] != faq_id]
-                                        save_qa_for_doc(doc_stem, doc_qa)
-                                        if st.session_state.current_doc == row["source"]:
-                                            st.session_state.current_qa = doc_qa
-                                        registry = load_registry()
-                                        for doc in registry:
-                                            if doc["stem"] == doc_stem:
-                                                doc["qa_count"] = len(doc_qa)
-                                        save_registry(registry)
+                                        api_delete(f"/faqs/{faq_id}")
                                         refresh_state()
                                         st.session_state.confirm_delete_id = None
                                         st.rerun()
