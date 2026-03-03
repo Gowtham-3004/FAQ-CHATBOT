@@ -1,6 +1,6 @@
-# FAQ Chatbot
+# AQ — Answer the Question
 
-An end-to-end FAQ chatbot system with an **Admin Portal** for document ingestion and a **floating chat widget** that can be embedded into any webpage with a single `<script>` tag.
+An end-to-end FAQ chatbot system with a **multi-page Admin Portal** for document ingestion and a **floating chat widget** that can be embedded into any webpage with a single `<script>` tag.
 
 Each admin user gets an isolated knowledge base — the widget only answers from documents uploaded by the user whose `data-user-id` matches.
 
@@ -9,29 +9,29 @@ Each admin user gets an isolated knowledge base — the widget only answers from
 ## Architecture
 
 ```
-Admin Portal (Streamlit :8502)
-  └── Login → POST /auth/login (MongoDB)
-  └── Upload documents (PDF, DOCX, TXT, XLSX)
-  └── Auto-generate Q&A via Google Gemini
-  └── Review / Edit / Delete Q&A
-  └── Q&A tagged with uploader's user_id → stored in MongoDB
+Admin Portal (Streamlit :8502)  — 5-page SaaS UI
+  ├── Overview     → stats, recent uploads, activity feed
+  ├── Documents    → upload + document library
+  ├── Q&A Manager  → search, filter, paginate, edit, delete, download
+  ├── Analytics    → charts + top-document table
+  └── Chat Preview → live chat test with API health indicator
 
 Chat API (FastAPI :8000)
-  └── POST /auth/login          → user authentication
-  └── POST /chat                → filtered keyword search + Gemini answer
-  └── GET/POST/PUT/DELETE /faqs       → Q&A CRUD
-  └── GET/POST/DELETE   /documents    → document registry CRUD
+  ├── POST /auth/login          → MongoDB user authentication
+  ├── POST /chat                → filtered keyword search + Gemini answer
+  ├── GET/POST/PUT/DELETE /faqs       → Q&A CRUD
+  ├── GET/POST/DELETE   /documents    → document registry CRUD
   └── GET  /widget.js           → serves embeddable widget
 
 MongoDB
-  └── users             → login credentials + roles
-  └── faqs              → Q&A pairs (each tagged with user_id)
+  ├── users             → login credentials + roles (auto-seeded)
+  ├── faqs              → Q&A pairs (each tagged with user_id)
   └── document_registry → uploaded document metadata
 
 Any Webpage
   └── <script data-user-id="admin" ...>
-  └── Widget sends user_id → backend filters FAQs by user_id
-  └── Floating 💬 chat bubble (bottom-right)
+      Widget sends user_id → backend filters FAQs by user_id
+      Floating 💬 chat bubble (bottom-right)
 ```
 
 ---
@@ -41,10 +41,10 @@ Any Webpage
 | Layer | Technology |
 |-------|-----------|
 | LLM | Google Gemini — `gemini-2.5-flash` |
-| Admin UI | Streamlit |
+| Admin UI | Streamlit (multi-page, custom CSS) |
 | Chat API | FastAPI + Uvicorn |
 | Document Parsing | pdfplumber, python-docx, openpyxl |
-| Auth | MongoDB (`users` collection) via FastAPI |
+| Auth | MongoDB (`users` collection) via FastAPI · 1-hour session TTL |
 | Storage | MongoDB Atlas (FAQs + registry + users) |
 | Multi-tenancy | `user_id` field on every FAQ document |
 | Widget | Vanilla JS + Shadow DOM |
@@ -63,9 +63,10 @@ FAQ-CHATBOT/
 │   ├── chat.py                 # Chat search + answer logic (filtered by user_id)
 │   └── main.py                 # FastAPI app (all API endpoints)
 ├── ui/
-│   └── admin.py                # Streamlit admin portal (calls FastAPI)
+│   └── admin.py                # Streamlit multi-page admin portal
 ├── public/
 │   └── widget.js               # Embeddable floating chat widget
+├── assets/                     # ← place screenshots here (see Admin Portal section)
 ├── floating_faq.html           # Test page for the chat widget
 └── requirements.txt
 ```
@@ -116,9 +117,9 @@ source .venv/bin/activate
 uvicorn src.main:app --reload --port 8000
 ```
 
-On first startup, default admin users are automatically seeded into MongoDB.
+On first startup, default users are automatically seeded into MongoDB.
 
-API docs available at: `http://localhost:8000/docs`
+API docs: `http://localhost:8000/docs`
 
 ### Terminal 2 — Admin Portal
 
@@ -127,75 +128,97 @@ source .venv/bin/activate
 streamlit run ui/admin.py --server.port 8502
 ```
 
-Admin portal at: `http://localhost:8502`
+Admin portal: `http://localhost:8502`
 
-> **Note:** The FastAPI server must be running before launching the admin portal.
+> **Note:** The FastAPI server must be running before opening the admin portal. If the backend is unreachable, the login page shows a clear error with the fix command.
 
 ---
 
 ## Admin Portal
 
+The portal is a 5-page SaaS UI with a pinned sidebar, custom Inter-font theme, and 1-hour session TTL.
+
 ### Login
 
-<!-- SCREENSHOT: Login page -->
-> ![Login Page](assets/login_page.png)
+Credentials are verified via `POST /auth/login` against MongoDB. A connection error is shown with the exact fix command if the backend is down.
+
+<!-- SCREENSHOT: Save as assets/login.png -->
+> ![Login](assets/login.png)
 
 ---
 
-### Upload & Extract Q&A
+### Page 1 — Overview
 
-1. Log in to the admin portal
-2. Upload a document (PDF, DOCX, TXT, or XLSX) in the left panel
-3. Click **Extract Q&A** — the system will:
-   - Extract and chunk the document text
-   - Send each chunk to Google Gemini
-   - Generate 2–5 Q&A pairs per chunk
-   - Save all Q&A to MongoDB, tagged with the logged-in user's `username` as `user_id`
-4. Q&A pairs appear in the right panel
+Landing page after login. Shows:
+- **4 stat cards** — Documents, Q&A Pairs, Text Chunks, Avg Q&A per Doc
+- **Recent Uploads** table — last 8 documents
+- **Recent Activity** feed — timestamped upload events
 
-<!-- SCREENSHOT: Upload and extraction in progress -->
-> ![Upload & Extract](assets/upload_extract.png)
+<!-- SCREENSHOT: Save as assets/overview.png -->
+> ![Overview](assets/overview.png)
 
 ---
 
-### Q&A Management
+### Page 2 — Documents
 
-Each extracted Q&A can be:
-- **Edited** — inline edit form with Save / Cancel (calls `PUT /faqs/{faq_id}`)
-- **Deleted** — shows confirmation prompt before deleting (calls `DELETE /faqs/{faq_id}`)
+Upload and manage source documents.
 
-<!-- SCREENSHOT: Q&A list with Edit and Delete buttons -->
-> ![Q&A List](assets/list_q&a.png)
+- Drag-and-drop file uploader (PDF, DOCX, TXT, XLSX)
+- Click **Extract Q&A** → document is chunked → Gemini generates Q&A → saved to MongoDB tagged with `user_id`
+- Each document card shows Q&A count, chunk count, uploader badge, and date
+- **View Q&A** navigates directly to the Q&A Manager filtered to that document
+- **Delete** opens a confirmation dialog and removes the document + all its Q&A
 
-<!-- SCREENSHOT: Inline edit form open -->
-> ![Edit Q&A](assets/edit_q&a.png)
-
-<!-- SCREENSHOT: Delete confirmation dialog -->
-> ![Delete Confirmation](assets/delete_confirm.png)
+<!-- SCREENSHOT: Save as assets/documents.png -->
+> ![Documents](assets/documents.png)
 
 ---
 
-### Document Library
+### Page 3 — Q&A Manager
 
-All uploaded documents are listed in the left sidebar with:
-- Upload date and uploader name
-- Chunk count and Q&A count
-- **View Q&A** — load that document's Q&A into the viewer
-- **Delete Document** — removes document and all its Q&A from MongoDB (with confirmation)
+Full Q&A browser across all documents.
 
-<!-- SCREENSHOT: Document library with documents listed -->
-> ![Document Library](assets/doc_library.png)
+- **Search** — filter by keyword across all questions
+- **Filter by document** — dropdown to scope to one source file
+- **Pagination** — 20 Q&A pairs per page with Previous / Next controls
+- **Inline edit** — click Edit to open a text area form; Save calls `PUT /faqs/{faq_id}`
+- **Delete** — confirmation prompt; calls `DELETE /faqs/{faq_id}`
+- **Download** — export current view as JSON or Excel (.xlsx)
+
+<!-- SCREENSHOT: Save as assets/qa_manager.png -->
+> ![Q&A Manager](assets/qa_manager.png)
+
+<!-- SCREENSHOT: Inline edit form open. Save as assets/qa_edit.png -->
+> ![Edit Q&A](assets/qa_edit.png)
 
 ---
 
-### Download Q&A
+### Page 4 — Analytics
 
-Extracted Q&A can be downloaded as:
-- **JSON** — for programmatic use
-- **Excel (.xlsx)** — for sharing / editing in spreadsheets
+Charts and stats across your knowledge base.
 
-<!-- SCREENSHOT: Download buttons -->
-> ![Download](assets/download.png)
+- Summary metrics (Documents, Q&A Pairs, Chunks, Avg Q&A/Doc)
+- **Bar chart** — Q&A pairs per document
+- **Line chart** — uploads over time
+- **Top documents** table sorted by Q&A count
+- Most active uploader callout
+
+<!-- SCREENSHOT: Save as assets/analytics.png -->
+> ![Analytics](assets/analytics.png)
+
+---
+
+### Page 5 — Chat Preview
+
+Test your chatbot live without leaving the admin portal.
+
+- **API health badge** — shows Online / Offline status of the FastAPI backend
+- Chat window renders user + bot bubbles
+- Calls `POST /chat` with the logged-in user's `user_id` so you only see your own documents
+- **Clear Chat** button resets the conversation
+
+<!-- SCREENSHOT: Save as assets/chat_preview.png -->
+> ![Chat Preview](assets/chat_preview.png)
 
 ---
 
@@ -211,21 +234,19 @@ Extracted Q&A can be downloaded as:
 </script>
 ```
 
-Paste this into `<head>` or before `</body>`. A floating 💬 bubble appears in the bottom-right corner.
+Paste into `<head>` or before `</body>`. A floating 💬 bubble appears in the bottom-right corner.
 
 ### Widget attributes
 
 | Attribute | Required | Description |
 |-----------|----------|-------------|
 | `data-api` | Yes | Base URL of the FastAPI server |
-| `data-user-id` | Recommended | Username whose documents to search. If omitted, searches all users' documents. |
+| `data-user-id` | Recommended | Username whose documents to search. Omit to search all users. |
 
-> ![Chat Bubble](assets/chat_bubble.png)
+<!-- SCREENSHOT: Widget bubble. Save as assets/widget_bubble.png -->
+> ![Widget Bubble](assets/chat_bubble.png)
 
-### Chat in action
-
-Click the bubble to open the chat panel. Type a question — the bot searches only that user's Q&A and replies using Google Gemini.
-
+<!-- SCREENSHOT: Widget chat open. Save as assets/widget_chat.png -->
 > ![Chat Window](assets/chat_window.png)
 
 > ![Bot Answer](assets/bot_answer.png)
@@ -245,14 +266,14 @@ Keyword scoring → top 4 relevant Q&A selected
         ↓
 Google Gemini generates a grounded answer
         ↓
-Reply shown in chat widget
+Reply shown in widget / Chat Preview
 ```
 
 ---
 
 ## Multi-Tenancy (Per-User Isolation)
 
-Every FAQ document stored in MongoDB has a `user_id` field equal to the username of the admin who uploaded it.
+Every FAQ stored in MongoDB has a `user_id` field matching the uploader's username.
 
 ```
 Admin "alice" uploads → FAQs stored with  user_id: "alice"
@@ -263,20 +284,18 @@ Widget with data-user-id="bob"   → only searches bob's FAQs
 Widget with no data-user-id      → searches all FAQs (no filter)
 ```
 
-This lets you embed different widgets on different customer sites while sharing a single backend.
-
 ---
 
 ## Managing Admin Users
 
-Users are stored in the MongoDB `users` collection. To add or change users, connect to your MongoDB cluster and update the collection directly:
+Users live in MongoDB's `users` collection. Add new users with:
 
 ```js
 // MongoDB Shell
 db.users.insertOne({
   username: "yourname",
   password: "yourpassword",
-  role: "admin",
+  role: "admin",         // "admin" or "editor"
   name: "Your Full Name"
 })
 ```
@@ -288,8 +307,8 @@ db.users.insertOne({
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/auth/login` | Verify credentials, return user record |
-| `POST` | `/chat` | Send a question, get an answer (filter by `user_id`) |
-| `GET` | `/faqs` | List Q&A pairs (filter by `?stem=` and/or `?user_id=`) |
+| `POST` | `/chat` | Send a question, get an answer (filtered by `user_id`) |
+| `GET` | `/faqs` | List Q&A pairs (`?stem=` and/or `?user_id=`) |
 | `POST` | `/faqs/bulk` | Replace all Q&A for a document stem |
 | `PUT` | `/faqs/{faq_id}` | Update a Q&A pair |
 | `DELETE` | `/faqs/{faq_id}` | Delete a Q&A pair |
