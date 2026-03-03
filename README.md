@@ -244,10 +244,9 @@ Paste into `<head>` or before `</body>`. A floating 💬 bubble appears in the b
 | `data-user-id` | Recommended | Username whose documents to search. Omit to search all users. |
 
 <!-- SCREENSHOT: Widget bubble. Save as assets/widget_bubble.png -->
-> ![Widget Bubble](assets/chat_bubble.png)
+> ![Widget Bubble](assets/chat_widget.png)
 
 <!-- SCREENSHOT: Widget chat open. Save as assets/widget_chat.png -->
-> ![Chat Window](assets/chat_window.png)
 
 > ![Bot Answer](assets/bot_answer.png)
 
